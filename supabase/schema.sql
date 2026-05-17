@@ -51,13 +51,18 @@ create table if not exists public.room_options (
 );
 
 create table if not exists public.wheel_results (
-  round_id uuid primary key references public.room_rounds(id) on delete cascade,
+  id uuid primary key default gen_random_uuid(),
   room_id uuid not null references public.rooms(id) on delete cascade,
-  selected_option_id uuid not null references public.room_options(id) on delete cascade,
+  round_id uuid not null references public.room_rounds(id) on delete cascade,
+  spin_number integer not null check (spin_number >= 1),
+  selected_option_id uuid references public.room_options(id) on delete set null,
+  selected_option_label text not null check (char_length(selected_option_label) between 1 and 80),
+  options_snapshot jsonb not null default '[]'::jsonb check (jsonb_typeof(options_snapshot) = 'array'),
   spin_started_at timestamptz not null default now(),
   spin_duration_ms integer not null default 5200 check (spin_duration_ms between 1200 and 15000),
   spin_seed text not null,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  unique (round_id, spin_number)
 );
 
 create table if not exists public.participants (
@@ -98,11 +103,74 @@ alter table public.room_options add column if not exists round_id uuid reference
 alter table public.submission_status add column if not exists round_id uuid references public.room_rounds(id) on delete cascade;
 alter table public.submissions add column if not exists round_id uuid references public.room_rounds(id) on delete cascade;
 
+alter table public.wheel_results add column if not exists id uuid;
+update public.wheel_results
+set id = gen_random_uuid()
+where id is null;
+alter table public.wheel_results alter column id set default gen_random_uuid();
+alter table public.wheel_results alter column id set not null;
+alter table public.wheel_results drop constraint if exists wheel_results_pkey;
+alter table public.wheel_results add constraint wheel_results_pkey primary key (id);
+
+alter table public.wheel_results add column if not exists spin_number integer;
+with numbered_spins as (
+  select ctid, row_number() over (partition by round_id order by spin_started_at, created_at) as spin_number
+  from public.wheel_results
+)
+update public.wheel_results wr
+set spin_number = numbered_spins.spin_number
+from numbered_spins
+where wr.ctid = numbered_spins.ctid
+  and wr.spin_number is null;
+alter table public.wheel_results alter column spin_number set not null;
+alter table public.wheel_results drop constraint if exists wheel_results_spin_number_check;
+alter table public.wheel_results add constraint wheel_results_spin_number_check check (spin_number >= 1);
+
+alter table public.wheel_results drop constraint if exists wheel_results_selected_option_id_fkey;
+alter table public.wheel_results alter column selected_option_id drop not null;
+alter table public.wheel_results add constraint wheel_results_selected_option_id_fkey
+  foreign key (selected_option_id) references public.room_options(id) on delete set null;
+
+alter table public.wheel_results add column if not exists selected_option_label text;
+update public.wheel_results wr
+set selected_option_label = ro.label
+from public.room_options ro
+where wr.selected_option_id = ro.id
+  and wr.selected_option_label is null;
+update public.wheel_results
+set selected_option_label = 'Unknown option'
+where selected_option_label is null;
+alter table public.wheel_results alter column selected_option_label set not null;
+alter table public.wheel_results drop constraint if exists wheel_results_selected_option_label_check;
+alter table public.wheel_results add constraint wheel_results_selected_option_label_check
+  check (char_length(selected_option_label) between 1 and 80);
+
+alter table public.wheel_results add column if not exists options_snapshot jsonb;
+update public.wheel_results wr
+set options_snapshot = coalesce(
+  (
+    select jsonb_agg(ro.label order by ro.sort_order)
+    from public.room_options ro
+    where ro.round_id = wr.round_id
+  ),
+  '[]'::jsonb
+)
+where wr.options_snapshot is null;
+alter table public.wheel_results alter column options_snapshot set default '[]'::jsonb;
+alter table public.wheel_results alter column options_snapshot set not null;
+alter table public.wheel_results drop constraint if exists wheel_results_options_snapshot_check;
+alter table public.wheel_results add constraint wheel_results_options_snapshot_check
+  check (jsonb_typeof(options_snapshot) = 'array');
+
+alter table public.wheel_results drop constraint if exists wheel_results_round_id_spin_number_key;
+alter table public.wheel_results add constraint wheel_results_round_id_spin_number_key unique (round_id, spin_number);
+
 create index if not exists idx_rooms_code on public.rooms(code);
 create index if not exists idx_room_rounds_room_id on public.room_rounds(room_id);
 create index if not exists idx_room_options_room_id on public.room_options(room_id);
 create index if not exists idx_room_options_round_id on public.room_options(round_id);
 create index if not exists idx_wheel_results_room_id on public.wheel_results(room_id);
+create index if not exists idx_wheel_results_round_id on public.wheel_results(round_id);
 create index if not exists idx_participants_room_id on public.participants(room_id);
 create index if not exists idx_submission_status_room_id on public.submission_status(room_id);
 create index if not exists idx_submission_status_round_id on public.submission_status(round_id);
@@ -615,6 +683,10 @@ declare
   v_round public.room_rounds%rowtype;
   v_result public.wheel_results%rowtype;
   v_option_count integer;
+  v_options_snapshot jsonb;
+  v_selected_option_id uuid;
+  v_selected_option_label text;
+  v_spin_number integer;
 begin
   select r.id, rs.host_token_hash
   into v_room_id, v_token_hash
@@ -646,49 +718,157 @@ begin
 
   select * into v_result
   from public.wheel_results wr
+  where wr.round_id = v_round.id
+  order by wr.spin_number desc
+  limit 1;
+
+  if v_result.id is not null
+    and v_result.spin_started_at + (v_result.spin_duration_ms * interval '1 millisecond') > now() then
+    return next v_result;
+    return;
+  end if;
+
+  select count(*) into v_option_count
+  from public.room_options
+  where round_id = v_round.id;
+
+  if v_option_count < 2 then
+    raise exception 'wheel rounds need at least 2 options';
+  end if;
+
+  select coalesce(jsonb_agg(ro.label order by ro.sort_order), '[]'::jsonb)
+  into v_options_snapshot
+  from public.room_options ro
+  where ro.round_id = v_round.id;
+
+  select ro.id, ro.label
+  into v_selected_option_id, v_selected_option_label
+  from public.room_options ro
+  where ro.round_id = v_round.id
+  order by random()
+  limit 1;
+
+  select coalesce(max(wr.spin_number), 0) + 1
+  into v_spin_number
+  from public.wheel_results wr
   where wr.round_id = v_round.id;
 
-  if v_result.round_id is null then
-    select count(*) into v_option_count
-    from public.room_options
-    where round_id = v_round.id;
+  insert into public.wheel_results (
+    room_id,
+    round_id,
+    spin_number,
+    selected_option_id,
+    selected_option_label,
+    options_snapshot,
+    spin_started_at,
+    spin_duration_ms,
+    spin_seed
+  )
+  values (
+    v_room_id,
+    v_round.id,
+    v_spin_number,
+    v_selected_option_id,
+    v_selected_option_label,
+    v_options_snapshot,
+    now(),
+    5200,
+    public.secure_token()
+  )
+  returning * into v_result;
 
-    if v_option_count < 2 then
-      raise exception 'wheel rounds need at least 2 options';
-    end if;
+  update public.room_rounds
+  set revealed_at = coalesce(revealed_at, v_result.spin_started_at)
+  where id = v_round.id;
 
-    insert into public.wheel_results (
-      room_id,
-      round_id,
-      selected_option_id,
-      spin_started_at,
-      spin_duration_ms,
-      spin_seed
-    )
-    select
-      v_room_id,
-      v_round.id,
-      ro.id,
-      now(),
-      5200,
-      public.secure_token()
-    from public.room_options ro
-    where ro.round_id = v_round.id
-    order by random()
-    limit 1
-    returning * into v_result;
-
-    update public.room_rounds
-    set revealed_at = coalesce(revealed_at, v_result.spin_started_at)
-    where id = v_round.id;
-
-    update public.rooms
-    set revealed_at = coalesce(revealed_at, v_result.spin_started_at)
-    where id = v_room_id;
-  end if;
+  update public.rooms
+  set revealed_at = coalesce(revealed_at, v_result.spin_started_at)
+  where id = v_room_id;
 
   return next v_result;
   return;
+end;
+$$;
+
+create or replace function public.update_wheel_options(
+  p_room_code text,
+  p_host_token text,
+  p_options text[] default array[]::text[]
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_room_id uuid;
+  v_token_hash text;
+  v_round public.room_rounds%rowtype;
+  v_latest_result public.wheel_results%rowtype;
+  v_clean_options text[];
+begin
+  select r.id, rs.host_token_hash
+  into v_room_id, v_token_hash
+  from public.rooms r
+  join public.room_secrets rs on rs.room_id = r.id
+  where r.code = public.normalize_room_code(p_room_code);
+
+  if v_room_id is null then
+    raise exception 'room not found';
+  end if;
+
+  if v_token_hash is null or extensions.crypt(coalesce(p_host_token, ''), v_token_hash) <> v_token_hash then
+    raise exception 'host token is invalid';
+  end if;
+
+  select * into v_round
+  from public.room_rounds
+  where room_id = v_room_id
+  order by round_number desc
+  limit 1;
+
+  if v_round.id is null then
+    raise exception 'room has no active round';
+  end if;
+
+  if v_round.mode::text <> 'wheel' then
+    raise exception 'this round is not a wheel round';
+  end if;
+
+  select * into v_latest_result
+  from public.wheel_results wr
+  where wr.round_id = v_round.id
+  order by wr.spin_number desc
+  limit 1;
+
+  if v_latest_result.id is not null
+    and v_latest_result.spin_started_at + (v_latest_result.spin_duration_ms * interval '1 millisecond') > now() then
+    raise exception 'wait for the current spin to finish before editing the wheel';
+  end if;
+
+  select coalesce(array_agg(label order by ordinality), array[]::text[])
+  into v_clean_options
+  from (
+    select distinct on (lower(trim(option_label)))
+      left(trim(option_label), 80) as label,
+      ordinality
+    from unnest(coalesce(p_options, array[]::text[])) with ordinality as t(option_label, ordinality)
+    where trim(option_label) <> ''
+    order by lower(trim(option_label)), ordinality
+  ) cleaned;
+
+  if coalesce(array_length(v_clean_options, 1), 0) < 2 then
+    raise exception 'wheel rounds need at least 2 options';
+  end if;
+
+  delete from public.room_options
+  where round_id = v_round.id;
+
+  insert into public.room_options (room_id, round_id, label, sort_order)
+  select v_room_id, v_round.id, option_label, ordinality
+  from unnest(v_clean_options) with ordinality as t(option_label, ordinality);
+
+  return true;
 end;
 $$;
 
@@ -790,6 +970,7 @@ grant execute on function public.save_submission(text, uuid, text, jsonb) to ano
 grant execute on function public.reveal_room(text, text) to anon, authenticated;
 grant execute on function public.start_next_round(text, text, text, public.room_mode, boolean, integer, text[]) to anon, authenticated;
 grant execute on function public.spin_wheel(text, text) to anon, authenticated;
+grant execute on function public.update_wheel_options(text, text, text[]) to anon, authenticated;
 grant execute on function public.is_room_host(text, text) to anon, authenticated;
 
 do $$

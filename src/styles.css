@@ -693,7 +693,7 @@ textarea:focus {
   position: relative;
   width: 100%;
   aspect-ratio: 1;
-  background: var(--wheel-gradient);
+  background: var(--wheel-gradient, #d9e5e1);
   border: 10px solid #fff;
   border-radius: 999px;
   box-shadow:
@@ -803,6 +803,65 @@ textarea:focus {
 
 .compact-wheel-result .winner-card strong {
   font-size: 1.02rem;
+}
+
+.wheel-spin-history,
+.wheel-editor {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.wheel-spin-history > strong,
+.wheel-editor-head strong {
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.spin-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.spin-history-row span {
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.spin-history-row strong {
+  min-width: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.wheel-editor-head,
+.wheel-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wheel-editor-form {
+  display: grid;
+  gap: 10px;
+}
+
+.wheel-editor textarea {
+  width: 100%;
+  min-height: 126px;
+  resize: vertical;
 }
 
 .compact-results {

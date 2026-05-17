@@ -9,14 +9,17 @@ import {
   Eye,
   EyeOff,
   History,
+  Pencil,
   Plus,
   Play,
   QrCode,
   RotateCcw,
+  Save,
   Send,
   Shuffle,
   Trophy,
   Users,
+  X,
 } from 'lucide-react';
 import { CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -32,6 +35,7 @@ import {
   spinWheel,
   startNextRound,
   subscribeToRoom,
+  updateWheelOptions,
 } from './lib/api';
 import { isSupabaseConfigured } from './lib/supabase';
 import {
@@ -967,23 +971,38 @@ function WheelRoundPanel({
   onSpun: () => void;
 }) {
   const result = snapshot.currentWheelResult;
+  const wheelResults = useMemo(
+    () => snapshot.wheelResults.filter((wheelResult) => wheelResult.round_id === snapshot.currentRound.id),
+    [snapshot.currentRound.id, snapshot.wheelResults],
+  );
+  const liveSegments = useMemo(() => getWheelSegmentsFromOptions(snapshot.options), [snapshot.options]);
+  const resultSegments = useMemo(() => (result ? getWheelSegmentsFromResult(result) : liveSegments), [liveSegments, result]);
+  const optionLines = useMemo(() => snapshot.options.map((option) => option.label).join('\n'), [snapshot.options]);
   const [now, setNow] = useState(() => Date.now());
   const [rotation, setRotation] = useState(0);
   const [transitionMs, setTransitionMs] = useState(0);
   const [isSpinning, setIsSpinning] = useState(false);
+  const [isEditingOptions, setIsEditingOptions] = useState(false);
+  const [isSavingOptions, setIsSavingOptions] = useState(false);
+  const [optionsText, setOptionsText] = useState(optionLines);
   const [error, setError] = useState('');
 
-  const targetRotation = useMemo(
-    () => (result ? getWheelTargetRotation(snapshot.options, result) : 0),
-    [snapshot.options, result],
-  );
+  const targetRotation = useMemo(() => (result ? getWheelTargetRotation(resultSegments, result) : 0), [resultSegments, result]);
+  const elapsed = result ? Math.max(0, now - Date.parse(result.spin_started_at)) : 0;
+  const isComplete = result ? elapsed >= result.spin_duration_ms : false;
+  const isActiveSpin = Boolean(result && !isComplete);
+  const displaySegments = result && !isComplete ? resultSegments : liveSegments;
   const wheelStyle = {
-    '--wheel-gradient': getWheelGradient(snapshot.options),
+    '--wheel-gradient': getWheelGradient(displaySegments),
     '--wheel-rotation': `${rotation}deg`,
     '--wheel-transition': `${transitionMs}ms`,
   } as CSSProperties;
-  const elapsed = result ? Math.max(0, now - Date.parse(result.spin_started_at)) : 0;
-  const isComplete = result ? elapsed >= result.spin_duration_ms : false;
+
+  useEffect(() => {
+    if (!isEditingOptions) {
+      setOptionsText(optionLines);
+    }
+  }, [isEditingOptions, optionLines]);
 
   useEffect(() => {
     if (!result) return undefined;
@@ -1041,6 +1060,29 @@ function WheelRoundPanel({
     }
   };
 
+  const saveOptions = async () => {
+    if (!hostToken) return;
+
+    const nextOptions = parseOptionText(optionsText);
+    if (nextOptions.length < 2) {
+      setError('Wheel rounds need at least 2 options.');
+      return;
+    }
+
+    setError('');
+
+    try {
+      setIsSavingOptions(true);
+      await updateWheelOptions(snapshot.room.code, hostToken, nextOptions);
+      setIsEditingOptions(false);
+      onSpun();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update the wheel options.');
+    } finally {
+      setIsSavingOptions(false);
+    }
+  };
+
   return (
     <div className="wheel-block">
       <div className="section-heading">
@@ -1062,33 +1104,74 @@ function WheelRoundPanel({
         </div>
       </div>
 
-      {result ? (
-        isComplete ? (
-          <WheelResultSummary options={snapshot.options} result={result} />
-        ) : (
-          <p className="wheel-status">Spinning for everyone...</p>
-        )
-      ) : (
-        <div className="wheel-options">
-          {snapshot.options.map((option, index) => (
-            <div className="wheel-option-row" key={option.id}>
-              <span style={{ background: WHEEL_COLORS[index % WHEEL_COLORS.length] }} />
-              <strong>{option.label}</strong>
+      {isActiveSpin ? <p className="wheel-status">Spinning for everyone...</p> : null}
+
+      <div className="wheel-options">
+        {displaySegments.map((segment, index) => (
+          <div className="wheel-option-row" key={`${segment.id ?? segment.label}-${index}`}>
+            <span style={{ background: WHEEL_COLORS[index % WHEEL_COLORS.length] }} />
+            <strong>{segment.label}</strong>
+          </div>
+        ))}
+      </div>
+
+      {result && isComplete ? <WheelResultSummary result={result} /> : null}
+      <WheelSpinHistory results={wheelResults} />
+
+      {hostToken ? (
+        <div className="wheel-editor">
+          <div className="wheel-editor-head">
+            <strong>Wheel options</strong>
+            {!isEditingOptions ? (
+              <Button
+                icon={<Pencil size={16} />}
+                variant="secondary"
+                onClick={() => {
+                  setError('');
+                  setIsEditingOptions(true);
+                }}
+                disabled={isActiveSpin}
+              >
+                Edit
+              </Button>
+            ) : null}
+          </div>
+
+          {isEditingOptions ? (
+            <div className="wheel-editor-form">
+              <textarea value={optionsText} onChange={(event) => setOptionsText(event.target.value)} rows={5} />
+              <div className="wheel-editor-actions">
+                <Button icon={<Save size={16} />} variant="secondary" onClick={saveOptions} disabled={isSavingOptions}>
+                  {isSavingOptions ? 'Saving...' : 'Save options'}
+                </Button>
+                <Button
+                  icon={<X size={16} />}
+                  variant="ghost"
+                  onClick={() => {
+                    setError('');
+                    setOptionsText(optionLines);
+                    setIsEditingOptions(false);
+                  }}
+                  disabled={isSavingOptions}
+                >
+                  Cancel
+                </Button>
+              </div>
             </div>
-          ))}
+          ) : null}
         </div>
-      )}
+      ) : null}
 
       {error ? <p className="form-error">{error}</p> : null}
 
-      {hostToken && !result ? (
+      {hostToken ? (
         <Button
           icon={<Play size={18} />}
           variant="danger"
           onClick={spin}
-          disabled={isSpinning || snapshot.options.length < 2}
+          disabled={isSpinning || isActiveSpin || isEditingOptions || snapshot.options.length < 2}
         >
-          {isSpinning ? 'Starting spin...' : 'Spin for everyone'}
+          {isSpinning ? 'Starting spin...' : result ? 'Spin again for everyone' : 'Spin for everyone'}
         </Button>
       ) : null}
 
@@ -1098,35 +1181,51 @@ function WheelRoundPanel({
 }
 
 function WheelResultSummary({
-  options,
   result,
   compact = false,
 }: {
-  options: RoomOption[];
   result: WheelResult | null;
   compact?: boolean;
 }) {
-  const winner = result ? options.find((option) => option.id === result.selected_option_id) : null;
-
   if (!result) {
     return <p className="muted">No wheel spin was recorded.</p>;
   }
+
+  const options = result.options_snapshot.length ? result.options_snapshot : [result.selected_option_label];
 
   return (
     <div className={compact ? 'wheel-result compact-wheel-result' : 'wheel-result'}>
       <div className="winner-card">
         <Trophy size={20} />
-        <span>Winner</span>
-        <strong>{winner?.label ?? 'Unknown option'}</strong>
+        <span>Spin {result.spin_number} winner</span>
+        <strong>{result.selected_option_label}</strong>
       </div>
       <div className="wheel-options compact-wheel-options">
         {options.map((option, index) => (
-          <div className={option.id === result.selected_option_id ? 'wheel-option-row selected' : 'wheel-option-row'} key={option.id}>
+          <div className={option === result.selected_option_label ? 'wheel-option-row selected' : 'wheel-option-row'} key={`${option}-${index}`}>
             <span style={{ background: WHEEL_COLORS[index % WHEEL_COLORS.length] }} />
-            <strong>{option.label}</strong>
+            <strong>{option}</strong>
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function WheelSpinHistory({ results }: { results: WheelResult[] }) {
+  const previousResults = results.slice(0, -1).reverse();
+
+  if (!previousResults.length) return null;
+
+  return (
+    <div className="wheel-spin-history">
+      <strong>Previous spins</strong>
+      {previousResults.map((result) => (
+        <div className="spin-history-row" key={result.id}>
+          <span>Spin {result.spin_number}</span>
+          <strong>{result.selected_option_label}</strong>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1155,7 +1254,8 @@ function PastRoundsPanel({ snapshot }: { snapshot: RoomSnapshot }) {
 function RoundSummary({ round, snapshot }: { round: RoomRound; snapshot: RoomSnapshot }) {
   const options = snapshot.allOptions.filter((option) => option.round_id === round.id);
   const submissions = snapshot.allSubmissions.filter((submission) => submission.round_id === round.id);
-  const wheelResult = snapshot.wheelResults.find((result) => result.round_id === round.id) ?? null;
+  const wheelResults = snapshot.wheelResults.filter((result) => result.round_id === round.id);
+  const wheelResult = wheelResults[wheelResults.length - 1] ?? null;
 
   return (
     <article className="round-summary">
@@ -1167,7 +1267,7 @@ function RoundSummary({ round, snapshot }: { round: RoomRound; snapshot: RoomSna
       </div>
 
       {round.mode === 'wheel' ? (
-        <WheelResultSummary options={options} result={wheelResult} compact />
+        <WheelResultSummary result={wheelResult} compact />
       ) : submissions.length ? (
         <RoundResultsTable
           round={round}
@@ -1368,6 +1468,11 @@ function getRankingScores(options: RoomOption[], submissions: Submission[]) {
 
 const WHEEL_COLORS = ['#0d9488', '#f06449', '#f3a712', '#4f46e5', '#16a34a', '#db2777', '#0891b2', '#ea580c'];
 
+type WheelSegment = {
+  id?: string;
+  label: string;
+};
+
 function getRoomModeLabel(mode: RoomMode) {
   if (mode === 'ranking') return 'Ranking';
   if (mode === 'wheel') return 'Wheel';
@@ -1380,26 +1485,53 @@ function getRoundFormatLabel(round: RoomRound) {
   return `Top ${round.max_answers}`;
 }
 
-function getWheelGradient(options: RoomOption[]) {
-  if (!options.length) return '#d9e5e1';
+function parseOptionText(value: string) {
+  const seen = new Set<string>();
 
-  const segmentSize = 360 / options.length;
+  return value
+    .split('\n')
+    .map((option) => option.trim())
+    .filter((option) => {
+      const key = option.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
 
-  return options
-    .map((option, index) => {
+function getWheelSegmentsFromOptions(options: RoomOption[]): WheelSegment[] {
+  return options.map((option) => ({ id: option.id, label: option.label }));
+}
+
+function getWheelSegmentsFromResult(result: WheelResult): WheelSegment[] {
+  const labels = result.options_snapshot.length ? result.options_snapshot : [result.selected_option_label];
+  return labels.map((label) => ({ label }));
+}
+
+function getWheelGradient(segments: WheelSegment[]) {
+  if (!segments.length) return '#d9e5e1';
+
+  const segmentSize = 360 / segments.length;
+
+  const stops = segments
+    .map((_, index) => {
       const start = index * segmentSize;
       const end = start + segmentSize;
       return `${WHEEL_COLORS[index % WHEEL_COLORS.length]} ${start}deg ${end}deg`;
     })
     .join(', ');
+
+  return `conic-gradient(${stops})`;
 }
 
-function getWheelTargetRotation(options: RoomOption[], result: WheelResult) {
-  const selectedIndex = options.findIndex((option) => option.id === result.selected_option_id);
+function getWheelTargetRotation(segments: WheelSegment[], result: WheelResult) {
+  const selectedIndex = segments.findIndex(
+    (segment) => segment.id === result.selected_option_id || segment.label === result.selected_option_label,
+  );
 
-  if (selectedIndex < 0 || !options.length) return 0;
+  if (selectedIndex < 0 || !segments.length) return 0;
 
-  const segmentSize = 360 / options.length;
+  const segmentSize = 360 / segments.length;
   const selectedCenter = selectedIndex * segmentSize + segmentSize / 2;
   const turns = 5 + (hashString(result.spin_seed) % 4);
 

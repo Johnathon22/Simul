@@ -120,6 +120,17 @@ export async function spinWheel(roomCode: string, hostToken: string) {
   return firstRpcRow<WheelResult>(data);
 }
 
+export async function updateWheelOptions(roomCode: string, hostToken: string, options: string[]) {
+  const client = requireSupabase();
+  const { error } = await client.rpc('update_wheel_options', {
+    p_room_code: normalizeRoomCode(roomCode),
+    p_host_token: hostToken,
+    p_options: options,
+  });
+
+  if (error) throwSupabaseError(error);
+}
+
 export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot> {
   const client = requireSupabase();
   const normalizedCode = normalizeRoomCode(roomCode);
@@ -152,7 +163,8 @@ export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot>
         .from('wheel_results')
         .select('*')
         .eq('room_id', room.id)
-        .order('spin_started_at', { ascending: true })
+        .order('round_id', { ascending: true })
+        .order('spin_number', { ascending: true })
         .returns<WheelResult[]>(),
       client
         .from('participants')
@@ -182,6 +194,7 @@ export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot>
 
   const allOptions = optionsResult.data ?? [];
   const wheelResults = wheelResultsResult.data ?? [];
+  const currentWheelResults = wheelResults.filter((result) => result.round_id === currentRound.id);
   const allStatuses = statusesResult.data ?? [];
   const allSubmissions = submissionsResult.data ?? [];
 
@@ -196,7 +209,7 @@ export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot>
     allStatuses,
     submissions: allSubmissions.filter((submission) => submission.round_id === currentRound.id),
     allSubmissions,
-    currentWheelResult: wheelResults.find((result) => result.round_id === currentRound.id) ?? null,
+    currentWheelResult: currentWheelResults[currentWheelResults.length - 1] ?? null,
     wheelResults,
   };
 }

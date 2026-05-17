@@ -59,9 +59,13 @@ export type Submission = {
 };
 
 export type WheelResult = {
+  id: string;
   room_id: string;
   round_id: string;
-  selected_option_id: string;
+  spin_number: number;
+  selected_option_id: string | null;
+  selected_option_label: string;
+  options_snapshot: string[];
   spin_started_at: string;
   spin_duration_ms: number;
   spin_seed: string;
