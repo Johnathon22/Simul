@@ -11,6 +11,7 @@ import type {
   Submission,
   SubmissionStatus,
   Participant,
+  WheelResult,
 } from './types';
 
 export function normalizeRoomCode(value: string) {
@@ -104,6 +105,17 @@ export async function startNextRound(roomCode: string, hostToken: string, input:
   return firstRpcRow<StartedRound>(data);
 }
 
+export async function spinWheel(roomCode: string, hostToken: string) {
+  const client = requireSupabase();
+  const { data, error } = await client.rpc('spin_wheel', {
+    p_room_code: normalizeRoomCode(roomCode),
+    p_host_token: hostToken,
+  });
+
+  if (error) throw error;
+  return firstRpcRow<WheelResult>(data);
+}
+
 export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot> {
   const client = requireSupabase();
   const normalizedCode = normalizeRoomCode(roomCode);
@@ -117,36 +129,44 @@ export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot>
   if (roomError) throw roomError;
   if (!room) throw new Error('Room not found.');
 
-  const [roundsResult, optionsResult, participantsResult, statusesResult, submissionsResult] = await Promise.all([
-    client
-      .from('room_rounds')
-      .select('*')
-      .eq('room_id', room.id)
-      .order('round_number', { ascending: true })
-      .returns<RoomRound[]>(),
-    client
-      .from('room_options')
-      .select('*')
-      .eq('room_id', room.id)
-      .order('round_id', { ascending: true })
-      .order('sort_order', { ascending: true })
-      .returns<RoomOption[]>(),
-    client
-      .from('participants')
-      .select('*')
-      .eq('room_id', room.id)
-      .order('created_at', { ascending: true })
-      .returns<Participant[]>(),
-    client
-      .from('submission_status')
-      .select('*')
-      .eq('room_id', room.id)
-      .returns<SubmissionStatus[]>(),
-    client.from('submissions').select('*').eq('room_id', room.id).returns<Submission[]>(),
-  ]);
+  const [roundsResult, optionsResult, wheelResultsResult, participantsResult, statusesResult, submissionsResult] =
+    await Promise.all([
+      client
+        .from('room_rounds')
+        .select('*')
+        .eq('room_id', room.id)
+        .order('round_number', { ascending: true })
+        .returns<RoomRound[]>(),
+      client
+        .from('room_options')
+        .select('*')
+        .eq('room_id', room.id)
+        .order('round_id', { ascending: true })
+        .order('sort_order', { ascending: true })
+        .returns<RoomOption[]>(),
+      client
+        .from('wheel_results')
+        .select('*')
+        .eq('room_id', room.id)
+        .order('spin_started_at', { ascending: true })
+        .returns<WheelResult[]>(),
+      client
+        .from('participants')
+        .select('*')
+        .eq('room_id', room.id)
+        .order('created_at', { ascending: true })
+        .returns<Participant[]>(),
+      client
+        .from('submission_status')
+        .select('*')
+        .eq('room_id', room.id)
+        .returns<SubmissionStatus[]>(),
+      client.from('submissions').select('*').eq('room_id', room.id).returns<Submission[]>(),
+    ]);
 
   if (roundsResult.error) throw roundsResult.error;
   if (optionsResult.error) throw optionsResult.error;
+  if (wheelResultsResult.error) throw wheelResultsResult.error;
   if (participantsResult.error) throw participantsResult.error;
   if (statusesResult.error) throw statusesResult.error;
   if (submissionsResult.error) throw submissionsResult.error;
@@ -157,6 +177,7 @@ export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot>
   if (!currentRound) throw new Error('Room has no active round.');
 
   const allOptions = optionsResult.data ?? [];
+  const wheelResults = wheelResultsResult.data ?? [];
   const allStatuses = statusesResult.data ?? [];
   const allSubmissions = submissionsResult.data ?? [];
 
@@ -171,6 +192,8 @@ export async function fetchRoomSnapshot(roomCode: string): Promise<RoomSnapshot>
     allStatuses,
     submissions: allSubmissions.filter((submission) => submission.round_id === currentRound.id),
     allSubmissions,
+    currentWheelResult: wheelResults.find((result) => result.round_id === currentRound.id) ?? null,
+    wheelResults,
   };
 }
 
@@ -195,6 +218,11 @@ export function subscribeToRoom(room: Room, onChange: () => void) {
     .on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'room_options', filter: `room_id=eq.${room.id}` },
+      queueRefresh,
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'wheel_results', filter: `room_id=eq.${room.id}` },
       queueRefresh,
     )
     .on(

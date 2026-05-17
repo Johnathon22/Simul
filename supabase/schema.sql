@@ -8,6 +8,8 @@ begin
   end if;
 end $$;
 
+alter type public.room_mode add value if not exists 'wheel';
+
 create table if not exists public.rooms (
   id uuid primary key default gen_random_uuid(),
   code text unique not null check (code ~ '^[A-Z2-9]{4,8}$'),
@@ -46,6 +48,16 @@ create table if not exists public.room_options (
   sort_order integer not null,
   created_at timestamptz not null default now(),
   unique (room_id, sort_order)
+);
+
+create table if not exists public.wheel_results (
+  round_id uuid primary key references public.room_rounds(id) on delete cascade,
+  room_id uuid not null references public.rooms(id) on delete cascade,
+  selected_option_id uuid not null references public.room_options(id) on delete cascade,
+  spin_started_at timestamptz not null default now(),
+  spin_duration_ms integer not null default 5200 check (spin_duration_ms between 1200 and 15000),
+  spin_seed text not null,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.participants (
@@ -90,6 +102,7 @@ create index if not exists idx_rooms_code on public.rooms(code);
 create index if not exists idx_room_rounds_room_id on public.room_rounds(room_id);
 create index if not exists idx_room_options_room_id on public.room_options(room_id);
 create index if not exists idx_room_options_round_id on public.room_options(round_id);
+create index if not exists idx_wheel_results_room_id on public.wheel_results(room_id);
 create index if not exists idx_participants_room_id on public.participants(room_id);
 create index if not exists idx_submission_status_room_id on public.submission_status(room_id);
 create index if not exists idx_submission_status_round_id on public.submission_status(round_id);
@@ -199,11 +212,11 @@ declare
   v_clean_title text := nullif(left(trim(coalesce(p_title, '')), 80), '');
   v_clean_options text[];
 begin
-  if coalesce(p_mode, 'free_text') = 'free_text' and (coalesce(p_max_answers, 1) < 1 or coalesce(p_max_answers, 1) > 5) then
+  if coalesce(p_mode::text, 'free_text') = 'free_text' and (coalesce(p_max_answers, 1) < 1 or coalesce(p_max_answers, 1) > 5) then
     raise exception 'max_answers must be between 1 and 5';
   end if;
 
-  if coalesce(p_mode, 'free_text') = 'ranking' then
+  if coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then
     select coalesce(array_agg(label order by ordinality), array[]::text[])
     into v_clean_options
     from (
@@ -216,7 +229,7 @@ begin
     ) cleaned;
 
     if coalesce(array_length(v_clean_options, 1), 0) < 2 then
-      raise exception 'ranking rooms need at least 2 options';
+      raise exception 'ranking and wheel rooms need at least 2 options';
     end if;
   end if;
 
@@ -231,7 +244,7 @@ begin
     coalesce(v_clean_title, 'Untitled room'),
     coalesce(p_mode, 'free_text'),
     coalesce(p_is_blind, false),
-    case when coalesce(p_mode, 'free_text') = 'ranking' then 1 else coalesce(p_max_answers, 1) end
+    case when coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then 1 else coalesce(p_max_answers, 1) end
   )
   returning id into v_room_id;
 
@@ -245,11 +258,11 @@ begin
     coalesce(v_clean_title, 'Untitled room'),
     coalesce(p_mode, 'free_text'),
     coalesce(p_is_blind, false),
-    case when coalesce(p_mode, 'free_text') = 'ranking' then 1 else coalesce(p_max_answers, 1) end
+    case when coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then 1 else coalesce(p_max_answers, 1) end
   )
   returning id into v_round_id;
 
-  if coalesce(p_mode, 'free_text') = 'ranking' then
+  if coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then
     insert into public.room_options (room_id, round_id, label, sort_order)
     select v_room_id, v_round_id, option_label, ordinality
     from unnest(v_clean_options) with ordinality as t(option_label, ordinality);
@@ -356,6 +369,10 @@ begin
     raise exception 'answers must be an array';
   end if;
 
+  if v_round.mode::text = 'wheel' then
+    raise exception 'wheel rounds do not accept submissions';
+  end if;
+
   v_answer_count := jsonb_array_length(p_answers);
 
   if v_answer_count < 1 then
@@ -433,7 +450,7 @@ set search_path = public, extensions
 as $$
 declare
   v_room_id uuid;
-  v_round_id uuid;
+  v_round public.room_rounds%rowtype;
   v_token_hash text;
 begin
   select r.id, rs.host_token_hash
@@ -450,19 +467,23 @@ begin
     raise exception 'host token is invalid';
   end if;
 
-  select id into v_round_id
+  select * into v_round
   from public.room_rounds
   where room_id = v_room_id
   order by round_number desc
   limit 1;
 
-  if v_round_id is null then
+  if v_round.id is null then
     raise exception 'room has no active round';
+  end if;
+
+  if v_round.mode::text = 'wheel' then
+    raise exception 'wheel rounds are revealed by spinning';
   end if;
 
   update public.room_rounds
   set revealed_at = coalesce(revealed_at, now())
-  where id = v_round_id;
+  where id = v_round.id;
 
   update public.rooms
   set revealed_at = coalesce(revealed_at, now())
@@ -526,11 +547,11 @@ begin
     raise exception 'reveal the current round before starting a new one';
   end if;
 
-  if coalesce(p_mode, 'free_text') = 'free_text' and (coalesce(p_max_answers, 1) < 1 or coalesce(p_max_answers, 1) > 5) then
+  if coalesce(p_mode::text, 'free_text') = 'free_text' and (coalesce(p_max_answers, 1) < 1 or coalesce(p_max_answers, 1) > 5) then
     raise exception 'max_answers must be between 1 and 5';
   end if;
 
-  if coalesce(p_mode, 'free_text') = 'ranking' then
+  if coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then
     select coalesce(array_agg(label order by ordinality), array[]::text[])
     into v_clean_options
     from (
@@ -543,7 +564,7 @@ begin
     ) cleaned;
 
     if coalesce(array_length(v_clean_options, 1), 0) < 2 then
-      raise exception 'ranking rounds need at least 2 options';
+      raise exception 'ranking and wheel rounds need at least 2 options';
     end if;
   end if;
 
@@ -556,18 +577,18 @@ begin
     coalesce(v_clean_title, 'Round ' || v_round_number),
     coalesce(p_mode, 'free_text'),
     coalesce(p_is_blind, false),
-    case when coalesce(p_mode, 'free_text') = 'ranking' then 1 else coalesce(p_max_answers, 1) end
+    case when coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then 1 else coalesce(p_max_answers, 1) end
   )
   returning id into v_round_id;
 
   update public.rooms
   set mode = coalesce(p_mode, 'free_text'),
       is_blind = coalesce(p_is_blind, false),
-      max_answers = case when coalesce(p_mode, 'free_text') = 'ranking' then 1 else coalesce(p_max_answers, 1) end,
+      max_answers = case when coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then 1 else coalesce(p_max_answers, 1) end,
       revealed_at = null
   where id = v_room_id;
 
-  if coalesce(p_mode, 'free_text') = 'ranking' then
+  if coalesce(p_mode::text, 'free_text') in ('ranking', 'wheel') then
     insert into public.room_options (room_id, round_id, label, sort_order)
     select v_room_id, v_round_id, option_label, ordinality
     from unnest(v_clean_options) with ordinality as t(option_label, ordinality);
@@ -575,6 +596,112 @@ begin
 
   round_id := v_round_id;
   round_number := v_round_number;
+  return next;
+end;
+$$;
+
+create or replace function public.spin_wheel(
+  p_room_code text,
+  p_host_token text
+)
+returns table (
+  room_id uuid,
+  round_id uuid,
+  selected_option_id uuid,
+  spin_started_at timestamptz,
+  spin_duration_ms integer,
+  spin_seed text,
+  created_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_room_id uuid;
+  v_token_hash text;
+  v_round public.room_rounds%rowtype;
+  v_result public.wheel_results%rowtype;
+  v_option_count integer;
+begin
+  select r.id, rs.host_token_hash
+  into v_room_id, v_token_hash
+  from public.rooms r
+  join public.room_secrets rs on rs.room_id = r.id
+  where r.code = public.normalize_room_code(p_room_code);
+
+  if v_room_id is null then
+    raise exception 'room not found';
+  end if;
+
+  if v_token_hash is null or extensions.crypt(coalesce(p_host_token, ''), v_token_hash) <> v_token_hash then
+    raise exception 'host token is invalid';
+  end if;
+
+  select * into v_round
+  from public.room_rounds
+  where room_id = v_room_id
+  order by round_number desc
+  limit 1;
+
+  if v_round.id is null then
+    raise exception 'room has no active round';
+  end if;
+
+  if v_round.mode::text <> 'wheel' then
+    raise exception 'this round is not a wheel round';
+  end if;
+
+  select * into v_result
+  from public.wheel_results wr
+  where wr.round_id = v_round.id;
+
+  if v_result.round_id is null then
+    select count(*) into v_option_count
+    from public.room_options
+    where round_id = v_round.id;
+
+    if v_option_count < 2 then
+      raise exception 'wheel rounds need at least 2 options';
+    end if;
+
+    insert into public.wheel_results (
+      room_id,
+      round_id,
+      selected_option_id,
+      spin_started_at,
+      spin_duration_ms,
+      spin_seed
+    )
+    select
+      v_room_id,
+      v_round.id,
+      ro.id,
+      now(),
+      5200,
+      public.secure_token()
+    from public.room_options ro
+    where ro.round_id = v_round.id
+    order by random()
+    limit 1
+    returning * into v_result;
+
+    update public.room_rounds
+    set revealed_at = coalesce(revealed_at, v_result.spin_started_at)
+    where id = v_round.id;
+
+    update public.rooms
+    set revealed_at = coalesce(revealed_at, v_result.spin_started_at)
+    where id = v_room_id;
+  end if;
+
+  room_id := v_result.room_id;
+  round_id := v_result.round_id;
+  selected_option_id := v_result.selected_option_id;
+  spin_started_at := v_result.spin_started_at;
+  spin_duration_ms := v_result.spin_duration_ms;
+  spin_seed := v_result.spin_seed;
+  created_at := v_result.created_at;
   return next;
 end;
 $$;
@@ -605,6 +732,7 @@ alter table public.rooms enable row level security;
 alter table public.room_rounds enable row level security;
 alter table public.room_secrets enable row level security;
 alter table public.room_options enable row level security;
+alter table public.wheel_results enable row level security;
 alter table public.participants enable row level security;
 alter table public.participant_secrets enable row level security;
 alter table public.submission_status enable row level security;
@@ -625,6 +753,12 @@ using (true);
 drop policy if exists "room options are readable by everyone" on public.room_options;
 create policy "room options are readable by everyone"
 on public.room_options
+for select
+using (true);
+
+drop policy if exists "wheel results are readable by everyone" on public.wheel_results;
+create policy "wheel results are readable by everyone"
+on public.wheel_results
 for select
 using (true);
 
@@ -660,6 +794,7 @@ grant usage on schema public to anon, authenticated;
 grant select on public.rooms to anon, authenticated;
 grant select on public.room_rounds to anon, authenticated;
 grant select on public.room_options to anon, authenticated;
+grant select on public.wheel_results to anon, authenticated;
 grant select on public.participants to anon, authenticated;
 grant select on public.submission_status to anon, authenticated;
 grant select on public.submissions to anon, authenticated;
@@ -668,6 +803,7 @@ grant execute on function public.join_room(text, text) to anon, authenticated;
 grant execute on function public.save_submission(text, uuid, text, jsonb) to anon, authenticated;
 grant execute on function public.reveal_room(text, text) to anon, authenticated;
 grant execute on function public.start_next_round(text, text, text, public.room_mode, boolean, integer, text[]) to anon, authenticated;
+grant execute on function public.spin_wheel(text, text) to anon, authenticated;
 grant execute on function public.is_room_host(text, text) to anon, authenticated;
 
 do $$
@@ -684,6 +820,11 @@ begin
 
   begin
     alter publication supabase_realtime add table public.room_options;
+  exception when duplicate_object then null;
+  end;
+
+  begin
+    alter publication supabase_realtime add table public.wheel_results;
   exception when duplicate_object then null;
   end;
 

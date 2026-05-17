@@ -1,4 +1,4 @@
-export type RoomMode = 'free_text' | 'ranking';
+export type RoomMode = 'free_text' | 'ranking' | 'wheel';
 
 export type Room = {
   id: string;
@@ -58,6 +58,16 @@ export type Submission = {
   updated_at: string;
 };
 
+export type WheelResult = {
+  room_id: string;
+  round_id: string;
+  selected_option_id: string;
+  spin_started_at: string;
+  spin_duration_ms: number;
+  spin_seed: string;
+  created_at: string;
+};
+
 export type RoomSnapshot = {
   room: Room;
   currentRound: RoomRound;
@@ -69,6 +79,8 @@ export type RoomSnapshot = {
   allStatuses: SubmissionStatus[];
   submissions: Submission[];
   allSubmissions: Submission[];
+  currentWheelResult: WheelResult | null;
+  wheelResults: WheelResult[];
 };
 
 export type CreateRoomInput = {

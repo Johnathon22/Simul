@@ -2,6 +2,7 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  CircleDot,
   Copy,
   Crown,
   DoorOpen,
@@ -9,12 +10,15 @@ import {
   EyeOff,
   History,
   Plus,
+  Play,
   QrCode,
   RotateCcw,
   Send,
+  Shuffle,
+  Trophy,
   Users,
 } from 'lucide-react';
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   createRoom,
@@ -25,6 +29,7 @@ import {
   normalizeRoomCode,
   revealRoom,
   saveSubmission,
+  spinWheel,
   startNextRound,
   subscribeToRoom,
 } from './lib/api';
@@ -37,7 +42,7 @@ import {
   setStoredDraft,
   setStoredParticipant,
 } from './lib/storage';
-import type { RoomMode, RoomOption, RoomRound, RoomSnapshot, StoredParticipant, Submission } from './lib/types';
+import type { RoomMode, RoomOption, RoomRound, RoomSnapshot, StoredParticipant, Submission, WheelResult } from './lib/types';
 
 type Route = { name: 'home' } | { name: 'room'; code: string };
 
@@ -239,8 +244,8 @@ function CreateRoomForm({ navigate }: { navigate: (to: string) => void }) {
       return;
     }
 
-    if (roomMode === 'ranking' && options.length < 2) {
-      setError('Ranking rooms need at least 2 options.');
+    if (roomMode !== 'free_text' && options.length < 2) {
+      setError(`${getRoomModeLabel(roomMode)} rooms need at least 2 options.`);
       return;
     }
 
@@ -249,7 +254,7 @@ function CreateRoomForm({ navigate }: { navigate: (to: string) => void }) {
       const created = await createRoom({
         title: title.trim() || 'Untitled room',
         mode: roomMode,
-        isBlind,
+        isBlind: roomMode === 'wheel' ? false : isBlind,
         maxAnswers,
         options,
       });
@@ -296,6 +301,13 @@ function CreateRoomForm({ navigate }: { navigate: (to: string) => void }) {
             >
               Rank choices
             </button>
+            <button
+              type="button"
+              className={roomMode === 'wheel' ? 'active' : ''}
+              onClick={() => setRoomMode('wheel')}
+            >
+              Spin wheel
+            </button>
           </div>
         </div>
 
@@ -311,19 +323,25 @@ function CreateRoomForm({ navigate }: { navigate: (to: string) => void }) {
               </button>
             </div>
           </Field>
-        ) : (
+        ) : roomMode === 'ranking' ? (
           <Field label="Choices" helper="One option per line. Everyone will rank the same list.">
+            <textarea value={optionsText} onChange={(event) => setOptionsText(event.target.value)} rows={5} />
+          </Field>
+        ) : (
+          <Field label="Wheel options" helper="One option per line. The host will spin the shared wheel.">
             <textarea value={optionsText} onChange={(event) => setOptionsText(event.target.value)} rows={5} />
           </Field>
         )}
 
-        <label className="switch-row">
-          <input type="checkbox" checked={isBlind} onChange={(event) => setIsBlind(event.target.checked)} />
-          <span>
-            <strong>Blind reveal</strong>
-            <small>Show answers without names.</small>
-          </span>
-        </label>
+        {roomMode !== 'wheel' ? (
+          <label className="switch-row">
+            <input type="checkbox" checked={isBlind} onChange={(event) => setIsBlind(event.target.checked)} />
+            <span>
+              <strong>Blind reveal</strong>
+              <small>Show answers without names.</small>
+            </span>
+          </label>
+        ) : null}
 
         {error ? <p className="form-error">{error}</p> : null}
 
@@ -401,6 +419,7 @@ function RoomPage({ roomCode, navigate }: { roomCode: string; navigate: (to: str
   const submittedCount = snapshot.statuses.length;
   const participantCount = snapshot.participants.length;
   const isRevealed = Boolean(snapshot.currentRound.revealed_at);
+  const isWheelRound = snapshot.currentRound.mode === 'wheel';
 
   return (
     <main className="room-page">
@@ -409,9 +428,13 @@ function RoomPage({ roomCode, navigate }: { roomCode: string; navigate: (to: str
           <span className="room-code">{formatRoomCode(snapshot.room.code)}</span>
           <h1>{snapshot.room.title}</h1>
           <p>
-            {isRevealed
-              ? `Round ${snapshot.currentRound.round_number} is revealed.`
-              : `Round ${snapshot.currentRound.round_number}: ${snapshot.currentRound.title} · ${submittedCount} of ${participantCount} submitted`}
+            {isWheelRound
+              ? snapshot.currentWheelResult
+                ? `Round ${snapshot.currentRound.round_number}: wheel spun.`
+                : `Round ${snapshot.currentRound.round_number}: ${snapshot.currentRound.title} - waiting for the spin`
+              : isRevealed
+                ? `Round ${snapshot.currentRound.round_number} is revealed.`
+                : `Round ${snapshot.currentRound.round_number}: ${snapshot.currentRound.title} - ${submittedCount} of ${participantCount} submitted`}
           </p>
         </div>
         <div className="room-hero-actions">
@@ -422,7 +445,20 @@ function RoomPage({ roomCode, navigate }: { roomCode: string; navigate: (to: str
 
       <div className="room-layout">
         <section className="panel main-panel">
-          {isRevealed ? (
+          {isWheelRound ? (
+            <>
+              {!participant ? <JoinRoomCard roomCode={snapshot.room.code} onJoined={setParticipant} /> : null}
+              <WheelRoundPanel snapshot={snapshot} hostToken={hostToken} onSpun={loadRoom} />
+              {snapshot.currentWheelResult ? (
+                hostToken ? (
+                  <NextRoundPanel snapshot={snapshot} hostToken={hostToken} onStarted={loadRoom} />
+                ) : (
+                  <WaitingForNextRound />
+                )
+              ) : null}
+              <PastRoundsPanel snapshot={snapshot} />
+            </>
+          ) : isRevealed ? (
             <>
               {!participant ? <JoinRoomCard roomCode={snapshot.room.code} onJoined={setParticipant} /> : null}
               <ResultsPanel snapshot={snapshot} />
@@ -752,8 +788,7 @@ function HostPanel({
 
       <div className="host-flags">
         <span>
-          Round {snapshot.currentRound.round_number}:{' '}
-          {snapshot.currentRound.mode === 'ranking' ? 'Ranking' : `Top ${snapshot.currentRound.max_answers}`}
+          Round {snapshot.currentRound.round_number}: {getRoundFormatLabel(snapshot.currentRound)}
         </span>
         <span>{snapshot.currentRound.is_blind ? 'Blind' : 'Named'}</span>
       </div>
@@ -799,8 +834,8 @@ function NextRoundPanel({
     event.preventDefault();
     setError('');
 
-    if (roomMode === 'ranking' && options.length < 2) {
-      setError('Ranking rounds need at least 2 options.');
+    if (roomMode !== 'free_text' && options.length < 2) {
+      setError(`${getRoomModeLabel(roomMode)} rounds need at least 2 options.`);
       return;
     }
 
@@ -809,7 +844,7 @@ function NextRoundPanel({
       await startNextRound(snapshot.room.code, hostToken, {
         title: title.trim() || `Round ${nextRoundNumber}`,
         mode: roomMode,
-        isBlind,
+        isBlind: roomMode === 'wheel' ? false : isBlind,
         maxAnswers,
         options,
       });
@@ -861,6 +896,13 @@ function NextRoundPanel({
             >
               Rank choices
             </button>
+            <button
+              type="button"
+              className={roomMode === 'wheel' ? 'active' : ''}
+              onClick={() => setRoomMode('wheel')}
+            >
+              Spin wheel
+            </button>
           </div>
         </div>
 
@@ -876,19 +918,25 @@ function NextRoundPanel({
               </button>
             </div>
           </Field>
-        ) : (
+        ) : roomMode === 'ranking' ? (
           <Field label="Choices" helper="One option per line.">
+            <textarea value={optionsText} onChange={(event) => setOptionsText(event.target.value)} rows={5} />
+          </Field>
+        ) : (
+          <Field label="Wheel options" helper="One option per line. Seeded from the previous round when possible.">
             <textarea value={optionsText} onChange={(event) => setOptionsText(event.target.value)} rows={5} />
           </Field>
         )}
 
-        <label className="switch-row">
-          <input type="checkbox" checked={isBlind} onChange={(event) => setIsBlind(event.target.checked)} />
-          <span>
-            <strong>Blind reveal</strong>
-            <small>Show answers without names.</small>
-          </span>
-        </label>
+        {roomMode !== 'wheel' ? (
+          <label className="switch-row">
+            <input type="checkbox" checked={isBlind} onChange={(event) => setIsBlind(event.target.checked)} />
+            <span>
+              <strong>Blind reveal</strong>
+              <small>Show answers without names.</small>
+            </span>
+          </label>
+        ) : null}
 
         {error ? <p className="form-error">{error}</p> : null}
 
@@ -905,6 +953,180 @@ function WaitingForNextRound() {
     <div className="next-wait">
       <h2>Waiting for the next round</h2>
       <p>The host can start another round with the same people and link.</p>
+    </div>
+  );
+}
+
+function WheelRoundPanel({
+  snapshot,
+  hostToken,
+  onSpun,
+}: {
+  snapshot: RoomSnapshot;
+  hostToken: string | null;
+  onSpun: () => void;
+}) {
+  const result = snapshot.currentWheelResult;
+  const [now, setNow] = useState(() => Date.now());
+  const [rotation, setRotation] = useState(0);
+  const [transitionMs, setTransitionMs] = useState(0);
+  const [isSpinning, setIsSpinning] = useState(false);
+  const [error, setError] = useState('');
+
+  const targetRotation = useMemo(
+    () => (result ? getWheelTargetRotation(snapshot.options, result) : 0),
+    [snapshot.options, result],
+  );
+  const wheelStyle = {
+    '--wheel-gradient': getWheelGradient(snapshot.options),
+    '--wheel-rotation': `${rotation}deg`,
+    '--wheel-transition': `${transitionMs}ms`,
+  } as CSSProperties;
+  const elapsed = result ? Math.max(0, now - Date.parse(result.spin_started_at)) : 0;
+  const isComplete = result ? elapsed >= result.spin_duration_ms : false;
+
+  useEffect(() => {
+    if (!result) return undefined;
+
+    const tick = () => setNow(Date.now());
+    tick();
+
+    if (Date.now() - Date.parse(result.spin_started_at) >= result.spin_duration_ms) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(tick, 120);
+    return () => window.clearInterval(timer);
+  }, [result]);
+
+  useEffect(() => {
+    if (!result) {
+      setRotation(0);
+      setTransitionMs(0);
+      return undefined;
+    }
+
+    const startedAt = Date.parse(result.spin_started_at);
+    const elapsedMs = Math.max(0, Date.now() - startedAt);
+
+    if (elapsedMs >= result.spin_duration_ms) {
+      setTransitionMs(0);
+      setRotation(targetRotation);
+      return undefined;
+    }
+
+    setTransitionMs(0);
+    setRotation(0);
+
+    const frame = window.requestAnimationFrame(() => {
+      setTransitionMs(Math.max(result.spin_duration_ms - elapsedMs, 600));
+      setRotation(targetRotation);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [result, targetRotation]);
+
+  const spin = async () => {
+    if (!hostToken) return;
+    setError('');
+
+    try {
+      setIsSpinning(true);
+      await spinWheel(snapshot.room.code, hostToken);
+      onSpun();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not spin the wheel.');
+    } finally {
+      setIsSpinning(false);
+    }
+  };
+
+  return (
+    <div className="wheel-block">
+      <div className="section-heading">
+        <div>
+          <h2>Spin wheel</h2>
+          <span>
+            Round {snapshot.currentRound.round_number} - {snapshot.options.length} options
+          </span>
+        </div>
+        <Shuffle size={18} />
+      </div>
+
+      <div className="wheel-stage" aria-live="polite">
+        <div className="wheel-pointer" />
+        <div className="wheel-disc" style={wheelStyle}>
+          <div className="wheel-hub">
+            <CircleDot size={24} />
+          </div>
+        </div>
+      </div>
+
+      {result ? (
+        isComplete ? (
+          <WheelResultSummary options={snapshot.options} result={result} />
+        ) : (
+          <p className="wheel-status">Spinning for everyone...</p>
+        )
+      ) : (
+        <div className="wheel-options">
+          {snapshot.options.map((option, index) => (
+            <div className="wheel-option-row" key={option.id}>
+              <span style={{ background: WHEEL_COLORS[index % WHEEL_COLORS.length] }} />
+              <strong>{option.label}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error ? <p className="form-error">{error}</p> : null}
+
+      {hostToken && !result ? (
+        <Button
+          icon={<Play size={18} />}
+          variant="danger"
+          onClick={spin}
+          disabled={isSpinning || snapshot.options.length < 2}
+        >
+          {isSpinning ? 'Starting spin...' : 'Spin for everyone'}
+        </Button>
+      ) : null}
+
+      {!hostToken && !result ? <p className="muted">Waiting for the host to spin.</p> : null}
+    </div>
+  );
+}
+
+function WheelResultSummary({
+  options,
+  result,
+  compact = false,
+}: {
+  options: RoomOption[];
+  result: WheelResult | null;
+  compact?: boolean;
+}) {
+  const winner = result ? options.find((option) => option.id === result.selected_option_id) : null;
+
+  if (!result) {
+    return <p className="muted">No wheel spin was recorded.</p>;
+  }
+
+  return (
+    <div className={compact ? 'wheel-result compact-wheel-result' : 'wheel-result'}>
+      <div className="winner-card">
+        <Trophy size={20} />
+        <span>Winner</span>
+        <strong>{winner?.label ?? 'Unknown option'}</strong>
+      </div>
+      <div className="wheel-options compact-wheel-options">
+        {options.map((option, index) => (
+          <div className={option.id === result.selected_option_id ? 'wheel-option-row selected' : 'wheel-option-row'} key={option.id}>
+            <span style={{ background: WHEEL_COLORS[index % WHEEL_COLORS.length] }} />
+            <strong>{option.label}</strong>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -933,6 +1155,7 @@ function PastRoundsPanel({ snapshot }: { snapshot: RoomSnapshot }) {
 function RoundSummary({ round, snapshot }: { round: RoomRound; snapshot: RoomSnapshot }) {
   const options = snapshot.allOptions.filter((option) => option.round_id === round.id);
   const submissions = snapshot.allSubmissions.filter((submission) => submission.round_id === round.id);
+  const wheelResult = snapshot.wheelResults.find((result) => result.round_id === round.id) ?? null;
 
   return (
     <article className="round-summary">
@@ -940,10 +1163,12 @@ function RoundSummary({ round, snapshot }: { round: RoomRound; snapshot: RoomSna
         <strong>
           Round {round.round_number}: {round.title}
         </strong>
-        <span>{round.mode === 'ranking' ? 'Ranking' : `Top ${round.max_answers}`}</span>
+        <span>{getRoundFormatLabel(round)}</span>
       </div>
 
-      {submissions.length ? (
+      {round.mode === 'wheel' ? (
+        <WheelResultSummary options={options} result={wheelResult} compact />
+      ) : submissions.length ? (
         <RoundResultsTable
           round={round}
           options={options}
@@ -960,7 +1185,7 @@ function RoundSummary({ round, snapshot }: { round: RoomRound; snapshot: RoomSna
 
 function getSeedOptions(snapshot: RoomSnapshot) {
   const values =
-    snapshot.currentRound.mode === 'ranking'
+    snapshot.currentRound.mode === 'ranking' || snapshot.currentRound.mode === 'wheel'
       ? snapshot.options.map((option) => option.label)
       : snapshot.submissions.flatMap((submission) => submission.answers);
 
@@ -1139,6 +1364,56 @@ function getRankingScores(options: RoomOption[], submissions: Submission[]) {
   }
 
   return [...scores.values()].sort((a, b) => b.score - a.score || a.option.sort_order - b.option.sort_order);
+}
+
+const WHEEL_COLORS = ['#0d9488', '#f06449', '#f3a712', '#4f46e5', '#16a34a', '#db2777', '#0891b2', '#ea580c'];
+
+function getRoomModeLabel(mode: RoomMode) {
+  if (mode === 'ranking') return 'Ranking';
+  if (mode === 'wheel') return 'Wheel';
+  return 'Write answers';
+}
+
+function getRoundFormatLabel(round: RoomRound) {
+  if (round.mode === 'ranking') return 'Ranking';
+  if (round.mode === 'wheel') return 'Wheel';
+  return `Top ${round.max_answers}`;
+}
+
+function getWheelGradient(options: RoomOption[]) {
+  if (!options.length) return '#d9e5e1';
+
+  const segmentSize = 360 / options.length;
+
+  return options
+    .map((option, index) => {
+      const start = index * segmentSize;
+      const end = start + segmentSize;
+      return `${WHEEL_COLORS[index % WHEEL_COLORS.length]} ${start}deg ${end}deg`;
+    })
+    .join(', ');
+}
+
+function getWheelTargetRotation(options: RoomOption[], result: WheelResult) {
+  const selectedIndex = options.findIndex((option) => option.id === result.selected_option_id);
+
+  if (selectedIndex < 0 || !options.length) return 0;
+
+  const segmentSize = 360 / options.length;
+  const selectedCenter = selectedIndex * segmentSize + segmentSize / 2;
+  const turns = 5 + (hashString(result.spin_seed) % 4);
+
+  return turns * 360 + (360 - selectedCenter);
+}
+
+function hashString(value: string) {
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+
+  return hash;
 }
 
 export default App;
