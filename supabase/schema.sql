@@ -604,15 +604,7 @@ create or replace function public.spin_wheel(
   p_room_code text,
   p_host_token text
 )
-returns table (
-  room_id uuid,
-  round_id uuid,
-  selected_option_id uuid,
-  spin_started_at timestamptz,
-  spin_duration_ms integer,
-  spin_seed text,
-  created_at timestamptz
-)
+returns setof public.wheel_results
 language plpgsql
 security definer
 set search_path = public, extensions
@@ -695,14 +687,8 @@ begin
     where id = v_room_id;
   end if;
 
-  room_id := v_result.room_id;
-  round_id := v_result.round_id;
-  selected_option_id := v_result.selected_option_id;
-  spin_started_at := v_result.spin_started_at;
-  spin_duration_ms := v_result.spin_duration_ms;
-  spin_seed := v_result.spin_seed;
-  created_at := v_result.created_at;
-  return next;
+  return next v_result;
+  return;
 end;
 $$;
 

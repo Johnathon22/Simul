@@ -37,6 +37,10 @@ function firstRpcRow<T>(data: T[] | T | null): T {
   return data;
 }
 
+function throwSupabaseError(error: { message?: string } | null) {
+  throw new Error(error?.message || 'Supabase request failed.');
+}
+
 export async function createRoom(input: CreateRoomInput) {
   const client = requireSupabase();
   const { data, error } = await client.rpc('create_room', {
@@ -47,7 +51,7 @@ export async function createRoom(input: CreateRoomInput) {
     p_options: input.options,
   });
 
-  if (error) throw error;
+  if (error) throwSupabaseError(error);
   return firstRpcRow<CreatedRoom>(data);
 }
 
@@ -58,7 +62,7 @@ export async function joinRoom(roomCode: string, displayName: string) {
     p_display_name: displayName,
   });
 
-  if (error) throw error;
+  if (error) throwSupabaseError(error);
   return firstRpcRow<JoinedRoom>(data);
 }
 
@@ -76,7 +80,7 @@ export async function saveSubmission(
     p_answers: answers,
   });
 
-  if (error) throw error;
+  if (error) throwSupabaseError(error);
 }
 
 export async function revealRoom(roomCode: string, hostToken: string) {
@@ -86,7 +90,7 @@ export async function revealRoom(roomCode: string, hostToken: string) {
     p_host_token: hostToken,
   });
 
-  if (error) throw error;
+  if (error) throwSupabaseError(error);
 }
 
 export async function startNextRound(roomCode: string, hostToken: string, input: CreateRoomInput) {
@@ -101,7 +105,7 @@ export async function startNextRound(roomCode: string, hostToken: string, input:
     p_options: input.options,
   });
 
-  if (error) throw error;
+  if (error) throwSupabaseError(error);
   return firstRpcRow<StartedRound>(data);
 }
 
@@ -112,7 +116,7 @@ export async function spinWheel(roomCode: string, hostToken: string) {
     p_host_token: hostToken,
   });
 
-  if (error) throw error;
+  if (error) throwSupabaseError(error);
   return firstRpcRow<WheelResult>(data);
 }
 
