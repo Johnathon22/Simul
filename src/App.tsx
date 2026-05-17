@@ -1536,11 +1536,17 @@ function getWheelGradient(segments: WheelSegment[]) {
 function getWheelLabelStyle(index: number, total: number) {
   const segmentSize = 360 / Math.max(total, 1);
   const angle = index * segmentSize + segmentSize / 2;
-  const normalizedAngle = ((angle % 360) + 360) % 360;
+  const angleRadians = (angle * Math.PI) / 180;
+  const labelRadius = total <= 4 ? 29 : 32;
+  const radialRotation = angle - 90;
+  const normalizedRotation = ((radialRotation + 180) % 360) - 180;
+  const readableRotation =
+    normalizedRotation > 90 ? normalizedRotation - 180 : normalizedRotation < -90 ? normalizedRotation + 180 : normalizedRotation;
 
   return {
-    '--slice-label-angle': `${angle}deg`,
-    '--slice-label-flip': normalizedAngle > 90 && normalizedAngle < 270 ? '180deg' : '0deg',
+    '--slice-label-x': `${50 + Math.sin(angleRadians) * labelRadius}%`,
+    '--slice-label-y': `${50 - Math.cos(angleRadians) * labelRadius}%`,
+    '--slice-label-rotation': `${readableRotation}deg`,
   } as CSSProperties;
 }
 

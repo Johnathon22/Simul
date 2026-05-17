@@ -714,19 +714,18 @@ textarea:focus {
 
 .wheel-slice-label {
   position: absolute;
-  top: 50%;
-  left: 50%;
+  top: var(--slice-label-y, 50%);
+  left: var(--slice-label-x, 50%);
   z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: calc(50% - 58px);
+  width: clamp(58px, 28%, 112px);
   height: 28px;
-  margin-top: -14px;
   color: #17211f;
   pointer-events: none;
-  transform: rotate(var(--slice-label-angle)) translateX(58px);
-  transform-origin: 0 50%;
+  transform: translate(-50%, -50%) rotate(var(--slice-label-rotation, 0deg));
+  transform-origin: 50% 50%;
 }
 
 .wheel-slice-label > span {
@@ -745,7 +744,6 @@ textarea:focus {
   border-radius: 999px;
   box-shadow: 0 4px 12px rgba(21, 55, 50, 0.12);
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.72);
-  transform: rotate(var(--slice-label-flip, 0deg));
 }
 
 .wheel-hub {
