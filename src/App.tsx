@@ -1098,6 +1098,15 @@ function WheelRoundPanel({
       <div className="wheel-stage" aria-live="polite">
         <div className="wheel-pointer" />
         <div className="wheel-disc" style={wheelStyle}>
+          {displaySegments.map((segment, index) => (
+            <span
+              className="wheel-slice-label"
+              key={`slice-label-${segment.id ?? segment.label}-${index}`}
+              style={getWheelLabelStyle(index, displaySegments.length)}
+            >
+              <span>{segment.label}</span>
+            </span>
+          ))}
           <div className="wheel-hub">
             <CircleDot size={24} />
           </div>
@@ -1522,6 +1531,17 @@ function getWheelGradient(segments: WheelSegment[]) {
     .join(', ');
 
   return `conic-gradient(${stops})`;
+}
+
+function getWheelLabelStyle(index: number, total: number) {
+  const segmentSize = 360 / Math.max(total, 1);
+  const angle = index * segmentSize + segmentSize / 2;
+  const normalizedAngle = ((angle % 360) + 360) % 360;
+
+  return {
+    '--slice-label-angle': `${angle}deg`,
+    '--slice-label-flip': normalizedAngle > 90 && normalizedAngle < 270 ? '180deg' : '0deg',
+  } as CSSProperties;
 }
 
 function getWheelTargetRotation(segments: WheelSegment[], result: WheelResult) {
